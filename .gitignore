@@ -1,0 +1,8 @@
+node_modules/
+test-results/
+playwright-report/
+.artifacts/
+*.tar.gz
+*.pdf
+*.zip
+.DS_Store
