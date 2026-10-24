@@ -1,0 +1,24 @@
+import {readFile, writeFile, realpath} from 'node:fs/promises';
+import {resolve, relative, isAbsolute} from 'node:path';
+import {createInterface} from 'node:readline/promises';
+import {encryptContent, decryptContent} from '../dist/final-vault.js';
+import {validateContent} from '../dist/final-model.js';
+
+const source = process.argv[2];
+if (!source) throw new Error('Usage: node scripts/encrypt-final.mjs /absolute/path/outside/repository/content.json (password via stdin)');
+const root = await realpath(new URL('..', import.meta.url));
+const sourcePath = await realpath(resolve(source));
+const location = relative(root, sourcePath);
+if (!location.startsWith('..' + '/') && !isAbsolute(location)) throw new Error('Keep the plaintext content outside this repository.');
+const content = validateContent(JSON.parse(await readFile(sourcePath, 'utf8')));
+const input = createInterface({input: process.stdin, terminal: false});
+process.stdout.write('Ready for password on stdin. Disable terminal echo before entering it.\n');
+const iterator = input[Symbol.asyncIterator]();
+let password = (await iterator.next()).value;
+input.close();
+const encrypted = await encryptContent(content, password);
+const verified = await decryptContent(encrypted, password);
+password = '';
+if (JSON.stringify(verified.data) !== JSON.stringify(content)) throw new Error('Encryption round trip failed');
+await writeFile(new URL('../dist/final.enc.json', import.meta.url), JSON.stringify(encrypted) + '\n');
+console.log(`Encrypted and verified ${content.scope.length} topics and ${content.questions.length} questions.`);

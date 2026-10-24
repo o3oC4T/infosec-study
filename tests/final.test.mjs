@@ -1,0 +1,52 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {encryptContent,decryptContent,encryptProgress,decryptProgress,VAULT_FORMAT} from '../dist/final-vault.js';
+import {validateContent,validateAttempt,createAttempt,finishAttempt,scoreAttempt} from '../dist/final-model.js';
+import {fixture} from './helpers/final-fixture.mjs';
+
+test('vault authenticates password and ciphertext; progress is encrypted and bound to its exam',async()=>{
+  const data=fixture();
+  const envelope=await encryptContent(data,'synthetic-password-for-tests');
+  assert.equal(envelope.format,VAULT_FORMAT);
+  assert.ok(envelope.iterations>=600000);
+  assert.ok(!JSON.stringify(envelope).includes(data.questions[0].prompt));
+  const {data:opened,key}=await decryptContent(envelope,'synthetic-password-for-tests');
+  assert.deepEqual(opened,data);assert.equal(key.extractable,false);
+  await assert.rejects(decryptContent(envelope,'wrong-password'));
+  const tampered={...envelope,ciphertext:(envelope.ciphertext[0]==='A'?'B':'A')+envelope.ciphertext.slice(1)};
+  await assert.rejects(decryptContent(tampered,'synthetic-password-for-tests'));
+  const attempt=createAttempt(data,60,1000);attempt.answers[0]='An answer that must remain private';
+  const progress=await encryptProgress(attempt,key,data.revision);
+  assert.ok(!JSON.stringify(progress).includes(attempt.answers[0]));
+  assert.deepEqual(await decryptProgress(progress,key,data.revision),attempt);
+  await assert.rejects(decryptProgress(progress,key,'different-exam'));
+  await assert.rejects(decryptProgress(envelope,key,data.revision));
+  assert.notEqual((await encryptProgress(attempt,key,data.revision)).iv,progress.iv);
+});
+test('fixed final exam covers every topic and validates saved answers and grading',()=>{
+  const data=validateContent(fixture());
+  const missing=fixture();missing.questions.forEach(q=>q.topic='topic-0');assert.throws(()=>validateContent(missing));
+  const attempt=createAttempt(data,60,1000);assert.equal(attempt.deadline,3601000);
+  assert.deepEqual(validateAttempt(attempt,data),attempt);
+  assert.throws(()=>validateAttempt({...attempt,index:21},data));
+  assert.throws(()=>validateAttempt({...attempt,answers:['bad']},data));
+  assert.throws(()=>validateAttempt({...attempt,revision:'another-version'},data));
+  attempt.answers[0]='Written answer';
+  const result=finishAttempt(attempt,data,true,3601001);
+  assert.equal(result.timedOut,true);assert.equal(result.grades[0],null);assert.deepEqual(result.grades[1],[false,false]);
+  assert.equal(scoreAttempt(result).graded,20);assert.equal(scoreAttempt(result).score,null);
+  result.grades[0]=[true,true];assert.deepEqual(scoreAttempt(result),{graded:21,total:21,score:5});
+  assert.deepEqual(validateAttempt(result,data),result);
+  const invalid=structuredClone(result);invalid.grades[1]=[true,true];assert.throws(()=>validateAttempt(invalid,data));
+  assert.deepEqual(createAttempt(data,0,4000000).answers,Array(21).fill(''));
+  assert.equal(createAttempt(data,0).deadline,null);
+});
+test('published final payload has only encryption metadata and ciphertext',()=>{
+  const envelope=JSON.parse(readFileSync(new URL('../dist/final.enc.json',import.meta.url),'utf8'));
+  assert.deepEqual(Object.keys(envelope).sort(),['ciphertext','format','iterations','iv','salt']);
+  assert.equal(envelope.format,VAULT_FORMAT);
+  assert.equal(Buffer.from(envelope.salt,'base64').length,16);
+  assert.equal(Buffer.from(envelope.iv,'base64').length,12);
+  assert.ok(Buffer.from(envelope.ciphertext,'base64').length>16);
+});
